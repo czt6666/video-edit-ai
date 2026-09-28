@@ -1,0 +1,24 @@
+# Secrets — never commit real credentials
+.env
+rclone/rclone.conf
+litellm/.litellm.env
+**/*.key
+**/*.pem
+
+# Local state / volumes (must NOT live inside the rclone/TOS mount)
+data/
+caddy_data/
+caddy_config/
+scratch/
+
+# OS / editor cruft
+.DS_Store
+*.swp
+__pycache__/
+*.pyc
+
+# local dev bring-up (not for prod)
+.local/
+
+# local python venv
+.venv/

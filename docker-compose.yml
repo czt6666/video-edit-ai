@@ -1,0 +1,152 @@
+# ============================================================================
+#  video-edit-ai — Plan A
+#  Integration-first: only `media-gateway` is self-authored. Everything else is
+#  an off-the-shelf open-source component wired together.
+#
+#  Isolation guarantee (acceptance #6): the `agent` service is attached ONLY to
+#  the internal network `agent_net`, so it can reach litellm + media-gateway +
+#  caddy but has NO route to the internet and NO provider credentials.
+#  rclone runs on the HOST (systemd) and mounts TOS at /mnt/tos.
+# ============================================================================
+
+networks:
+  # No external connectivity. Anything that must stay offline lives here only.
+  agent_net:
+    internal: true
+  # Has egress; for services that legitimately call the internet.
+  egress:
+    driver: bridge
+
+volumes:
+  caddy_data:
+  caddy_config:
+  # Sessions + memory for the agent. Managed skills/CLAUDE.md are refreshed from
+  # the image on every boot by the entrypoint; user data here is preserved.
+  agent_home:
+  # Local scratch for the agent — fast disk, never synced to TOS.
+  agent_scratch:
+  filebrowser_data:
+
+services:
+  # ---- Public TLS entrypoint + shared password ----------------------------
+  caddy:
+    image: caddy:2.8
+    restart: unless-stopped
+    networks: [agent_net, egress]
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      DOMAIN: ${DOMAIN}
+      ACME_EMAIL: ${ACME_EMAIL}
+      CADDY_BASIC_USER: ${CADDY_BASIC_USER}
+      CADDY_BASIC_HASH: ${CADDY_BASIC_HASH}
+    volumes:
+      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+  # ---- Claude Code UI + CLI + ffmpeg + our CLIs + Skills ------------------
+  agent:
+    build:
+      context: ./agent
+      args:
+        # Pin these to exact tags/commits before deploying (see agent/Dockerfile).
+        CCUI_REF: ${CCUI_REF:-main}
+        CLAUDE_CODE_VERSION: ${CLAUDE_CODE_VERSION:-latest}
+    restart: unless-stopped
+    networks: [agent_net]           # <-- offline: no egress, only in-net peers
+    expose:
+      - "3001"
+    environment:
+      # Gateway endpoints + tokens ONLY. No real provider keys here.
+      ANTHROPIC_BASE_URL: http://litellm:4000
+      ANTHROPIC_AUTH_TOKEN: ${LITELLM_MASTER_KEY}
+      ANTHROPIC_MODEL: ${ANTHROPIC_MODEL}
+      CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
+      MEDIA_GATEWAY_URL: http://media-gateway:8080
+      MEDIA_GATEWAY_TOKEN: ${MEDIA_GATEWAY_TOKEN}
+      # claudecodeui
+      SERVER_PORT: "3001"
+      WORKSPACES_ROOT: ${WORKSPACES_ROOT:-/workspace}
+      DATABASE_PATH: /home/agent/.claude/ccui-auth.db
+      JWT_SECRET: ${CCUI_JWT_SECRET}
+    volumes:
+      # TOS mount (host, rclone) -> workspace (read-write)
+      - /mnt/tos:/workspace:rw
+      # raw/ read-only overlay: FileBrowser can still upload to it (writes via
+      # the rw /srv mount), but the agent cannot overwrite originals.
+      - /mnt/tos/raw:/workspace/raw:ro
+      # Local scratch — fast, never synced to TOS.
+      - agent_scratch:/scratch
+      # Persistent sessions + memory + auth DB.
+      - agent_home:/home/agent/.claude
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 512
+    deploy:
+      resources:
+        limits:
+          cpus: "6.0"
+          memory: 8g
+    depends_on:
+      - litellm
+      - media-gateway
+
+  # ---- FileBrowser Quantum (finder-like file manager) --------------------
+  filebrowser:
+    # Pin to a fixed tag; do not track :latest / beta in production.
+    image: gtstef/filebrowser:v2.0.0
+    restart: unless-stopped
+    networks: [egress]
+    expose:
+      - "80"
+    environment:
+      FB_ADMIN_USER: ${FB_ADMIN_USER}
+      FB_ADMIN_PASSWORD: ${FB_ADMIN_PASSWORD}
+    volumes:
+      - /mnt/tos:/srv:rw
+      - ./filebrowser/config.yaml:/home/filebrowser/data/config.yaml:ro
+      - filebrowser_data:/home/filebrowser/data/db
+
+  # ---- LiteLLM (LLM gateway; holds the real Anthropic key) ---------------
+  litellm:
+    image: ${LITELLM_IMAGE}
+    restart: unless-stopped
+    networks: [agent_net, egress]
+    expose:
+      - "4000"
+    environment:
+      LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      # Optional dev upstream (OpenAI-compatible test gateway)
+      DEV_OPENAI_BASE_URL: ${DEV_OPENAI_BASE_URL:-}
+      DEV_OPENAI_API_KEY: ${DEV_OPENAI_API_KEY:-}
+    command: ["--config", "/app/config.yaml", "--port", "4000"]
+    volumes:
+      - ./litellm/config.yaml:/app/config.yaml:ro
+
+  # ---- media-gateway (the ONLY self-authored service) --------------------
+  media-gateway:
+    build: ./media-gateway
+    restart: unless-stopped
+    networks: [agent_net, egress]
+    expose:
+      - "8080"
+    environment:
+      MG_TOKEN: ${MEDIA_GATEWAY_TOKEN}
+      TOS_REGION: ${TOS_REGION}
+      TOS_ENDPOINT: ${TOS_ENDPOINT}
+      TOS_BUCKET: ${TOS_BUCKET}
+      TOS_PREFIX: ${TOS_PREFIX}
+      TOS_ACCESS_KEY: ${TOS_ACCESS_KEY}
+      TOS_SECRET_KEY: ${TOS_SECRET_KEY}
+      DOUBAO_ASR_BASE_URL: ${DOUBAO_ASR_BASE_URL}
+      DOUBAO_ASR_APP_KEY: ${DOUBAO_ASR_APP_KEY}
+      DOUBAO_ASR_ACCESS_KEY: ${DOUBAO_ASR_ACCESS_KEY}
+      DOUBAO_ASR_RESOURCE: ${DOUBAO_ASR_RESOURCE:-volc.bigasr.auc}
+      ARK_BASE_URL: ${ARK_BASE_URL}
+      ARK_API_KEY: ${ARK_API_KEY}
+      ARK_VLM_MODEL: ${ARK_VLM_MODEL}
+    security_opt:
+      - no-new-privileges:true

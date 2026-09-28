@@ -1,0 +1,53 @@
+#!/usr/bin/env python3
+"""vslice — return only the transcript (and shots, if present) for a time range.
+
+Keeps the context small: never dumps the whole transcript, just the window.
+"""
+import argparse
+import json
+import os
+
+import _vcommon as v
+
+
+def main():
+    ap = argparse.ArgumentParser(description="Slice transcript for a time range")
+    ap.add_argument("target", help="video file or analysis dir")
+    ap.add_argument("--start", required=True)
+    ap.add_argument("--end", required=True)
+    ap.add_argument("--view", choices=["compact", "json"], default="compact")
+    a = ap.parse_args()
+
+    _, adir = v.resolve_video(a.target)
+    tj = os.path.join(adir, "transcript.json")
+    if not os.path.isfile(tj):
+        raise SystemExit(f"no transcript; run vasr first ({v.rel_to_workspace(adir)})")
+
+    start, end = v.parse_ts(a.start), v.parse_ts(a.end)
+    with open(tj) as f:
+        utts = [u for u in json.load(f)["utterances"]
+                if u["end_time"] / 1000 >= start and u["start_time"] / 1000 <= end]
+
+    shots = []
+    sj = os.path.join(adir, "shots.json")
+    if os.path.isfile(sj):
+        with open(sj) as f:
+            shots = [s for s in json.load(f)
+                     if s.get("end", 0) >= start and s.get("start", 0) <= end]
+
+    if a.view == "json":
+        print(json.dumps({"start": start, "end": end, "utterances": utts, "shots": shots},
+                         ensure_ascii=False, indent=2))
+        return
+
+    print(f"# {v.hms(start)}–{v.hms(end)}  ({len(utts)} lines)")
+    for u in utts:
+        print(f"[{v.hms(u['start_time'] / 1000)}] {u.get('text', '')}")
+    if shots:
+        print("\n# shots")
+        for s in shots:
+            print(f"[{v.hms(s['start'])}–{v.hms(s['end'])}] shot")
+
+
+if __name__ == "__main__":
+    main()

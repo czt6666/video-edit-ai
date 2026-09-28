@@ -1,0 +1,45 @@
+# ============================================================================
+#  LiteLLM proxy config — the ONLY place the real Anthropic key lives.
+#
+#  SECURITY: pin the image tag in .env (LITELLM_IMAGE). NEVER run 1.82.7 or
+#  1.82.8 — those PyPI/Docker releases were backdoored (TeamPCP supply-chain
+#  compromise, 2026-03-24). Use a cosign-signed >= 1.83.14 build and verify the
+#  signature. Ref: https://docs.litellm.ai/blog/security-update-march-2026
+#
+#  The agent sends Anthropic-format requests to http://litellm:4000/v1/messages
+#  with model = ANTHROPIC_MODEL (alias below). MVP: no database; master_key is
+#  the agent's bearer token. Add Postgres + virtual keys only when you need
+#  per-user budgets/usage.
+#
+#  Simpler alternative (fewer deps): if you never need multi-model routing, drop
+#  LiteLLM and let Caddy reverse-proxy api.anthropic.com while injecting the
+#  x-api-key header. LiteLLM is kept here for aliasing + a swappable upstream.
+# ============================================================================
+
+model_list:
+  # Production: route the alias straight to Anthropic.
+  - model_name: claude-sonnet-5
+    litellm_params:
+      model: anthropic/claude-sonnet-5
+      api_key: os.environ/ANTHROPIC_API_KEY
+  - model_name: claude-opus-4-8
+    litellm_params:
+      model: anthropic/claude-opus-4-8
+      api_key: os.environ/ANTHROPIC_API_KEY
+
+  # Dev-only: route the SAME alias to the shared OpenAI-compatible test gateway
+  # instead of Anthropic. Comment out the two Anthropic entries above and
+  # uncomment this to smoke-test agent connectivity without an Anthropic key.
+  # LiteLLM translates the Anthropic /v1/messages request into OpenAI format.
+  # - model_name: claude-sonnet-5
+  #   litellm_params:
+  #     model: openai/deepseek-v4-pro
+  #     api_base: os.environ/DEV_OPENAI_BASE_URL
+  #     api_key: os.environ/DEV_OPENAI_API_KEY
+
+litellm_settings:
+  # Silently drop provider-unsupported params so alias swaps don't 400.
+  drop_params: true
+
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY

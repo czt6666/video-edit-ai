@@ -1,0 +1,30 @@
+# Caddy: TLS + one shared password (basic auth) in front of both subdomains.
+# Neither upstream is exposed to the host directly — Caddy is the only door.
+{
+	email {$ACME_EMAIL}
+}
+
+# ---- Chat UI (Claude Code UI) --------------------------------------------
+# claudecodeui keeps its own single-account login behind this, so users see the
+# Caddy gate first, then the app login (documented double login — see SPIKE.md).
+edit.{$DOMAIN} {
+	basic_auth {
+		{$CADDY_BASIC_USER} {$CADDY_BASIC_HASH}
+	}
+	# reverse_proxy handles WebSocket upgrades automatically (needed for the
+	# live session stream / multi-browser resume).
+	reverse_proxy agent:3001
+}
+
+# ---- File manager (FileBrowser Quantum) ----------------------------------
+# We use FileBrowser's proxy-header auth: Caddy has already authenticated the
+# request, so it injects the trusted username. FileBrowser trusts X-Forwarded-User
+# ONLY because it is never reachable except through Caddy (internal network).
+files.{$DOMAIN} {
+	basic_auth {
+		{$CADDY_BASIC_USER} {$CADDY_BASIC_HASH}
+	}
+	reverse_proxy filebrowser:80 {
+		header_up X-Forwarded-User {$CADDY_BASIC_USER}
+	}
+}

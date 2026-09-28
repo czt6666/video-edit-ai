@@ -1,0 +1,45 @@
+# systemd unit: mount TOS at /mnt/tos with a VFS cache, auto-restart on failure.
+# Install:
+#   sudo cp rclone/rclone.conf.example /etc/rclone/rclone.conf   # then edit
+#   sudo cp rclone/rclone-tos.service /etc/systemd/system/
+#   sudo mkdir -p /mnt/tos /data/rclone-cache
+#   sudo systemctl daemon-reload && sudo systemctl enable --now rclone-tos
+#
+# Docker must start AFTER this mount. Add to the docker unit (drop-in):
+#   [Unit]
+#   RequiresMountsFor=/mnt/tos
+#
+# NOTE on --allow-other + uid/gid: the agent container runs as uid 10001. Set
+# --uid/--gid so files under /mnt/tos are owned by that id, and enable
+# `user_allow_other` in /etc/fuse.conf so --allow-other works.
+
+[Unit]
+Description=rclone mount TOS at /mnt/tos
+After=network-online.target
+Wants=network-online.target
+AssertPathIsDirectory=/mnt/tos
+
+[Service]
+Type=notify
+# Point BUCKET/PREFIX at your TOS layout (matches TOS_PREFIX in .env).
+Environment=RCLONE_CONFIG=/etc/rclone/rclone.conf
+ExecStart=/usr/bin/rclone mount tos:your-bucket/video-edit /mnt/tos \
+  --config /etc/rclone/rclone.conf \
+  --vfs-cache-mode full \
+  --cache-dir /data/rclone-cache \
+  --vfs-cache-max-size 200G \
+  --vfs-cache-max-age 24h \
+  --dir-cache-time 20s \
+  --use-server-modtime \
+  --vfs-write-back 10s \
+  --s3-directory-markers \
+  --allow-other \
+  --uid 10001 --gid 10001 \
+  --umask 002 \
+  --log-level INFO
+ExecStop=/bin/fusermount -uz /mnt/tos
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

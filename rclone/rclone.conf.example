@@ -1,0 +1,23 @@
+# Copy to rclone/rclone.conf (or /etc/rclone/rclone.conf) and fill in.
+# Volcengine TOS is S3-compatible. Provider = Other.
+#
+# Endpoint: use the public S3 endpoint below, OR — if the host is a Volcengine
+# ECS in the SAME region — prefer the internal endpoint (no egress cost, faster).
+# Confirm the exact internal hostname in the Volcengine TOS console/docs.
+#   public   : https://tos-s3-<region>.volces.com
+#   internal : https://tos-s3-<region>.ivolces.com   (verify per docs)
+#
+# Use a SUB-ACCOUNT AK/SK whose bucket policy is limited to the prefix.
+
+[tos]
+type = s3
+provider = Other
+access_key_id = YOUR_SUBACCOUNT_AK
+secret_access_key = YOUR_SUBACCOUNT_SK
+region = cn-beijing
+endpoint = https://tos-s3-cn-beijing.volces.com
+# TOS uses virtual-hosted style; keep path-style off.
+force_path_style = false
+# HTTP/2 against TOS is unreliable for large streamed reads — disable it.
+disable_http2 = true
+# Keep server-side timestamps so modtime-based cache keys stay stable.

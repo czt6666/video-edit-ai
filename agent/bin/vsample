@@ -1,0 +1,94 @@
+#!/usr/bin/env python3
+"""vsample — sample n frames across a range, montage them, and VLM-scan them.
+
+Takes the MIDPOINT of n equal sub-intervals (avoids endpoint/transition frames),
+fast-seeks each frame, scales short side ~640, burns the timestamp, tiles into a
+4-wide contact sheet, and (optionally) sends the frames to media-gateway's VLM.
+The sheet path is returned so Claude can Read the image itself for key decisions.
+
+Cache key = video key + start + end + n + question + model name.
+"""
+import argparse
+import base64
+import hashlib
+import json
+import os
+
+import _vcommon as v
+
+
+def main():
+    ap = argparse.ArgumentParser(description="Sample + montage + VLM-scan frames")
+    ap.add_argument("video")
+    ap.add_argument("--start", required=True)
+    ap.add_argument("--end", required=True)
+    ap.add_argument("--n", type=int, default=16)
+    ap.add_argument("--question", default="")
+    ap.add_argument("--mode", choices=["both", "vlm", "sheet"], default="both")
+    a = ap.parse_args()
+
+    video, adir = v.resolve_video(a.video)
+    v.ensure_meta(adir, video)
+    start, end = v.parse_ts(a.start), v.parse_ts(a.end)
+    if end <= start:
+        raise SystemExit("end must be > start")
+    n = a.n
+    interval = (end - start) / n
+
+    model = os.environ.get("ARK_VLM_MODEL", "default")
+    key = f"{v.rel_to_workspace(video)}|{start}|{end}|{n}|{a.question}|{model}"
+    h = hashlib.sha1(key.encode()).hexdigest()[:12]
+    samp_dir = os.path.join(adir, "samples", h)
+    frames_dir = os.path.join(samp_dir, "frames")
+    os.makedirs(frames_dir, exist_ok=True)
+    cache = os.path.join(samp_dir, "result.json")
+    if os.path.isfile(cache):
+        v.eprint("[vsample] cache hit")
+        print(open(cache).read())
+        return
+
+    # midpoints of n equal sub-intervals
+    times = [start + interval * (i + 0.5) for i in range(n)]
+    for i, t in enumerate(times):
+        fp = os.path.join(frames_dir, f"f{i:02d}.jpg")
+        if os.path.isfile(fp):
+            continue
+        label = v.hms(t).replace(":", r"\:")  # colons are option separators in -vf
+        vf = ("scale='if(gt(iw,ih),-2,640)':'if(gt(iw,ih),640,-2)',"
+              f"drawtext=fontfile={v.FONT}:text='{label}':x=10:y=10:"
+              "fontsize=28:fontcolor=white:box=1:boxcolor=black@0.5")
+        v.run(["ffmpeg", "-y", "-loglevel", "error", "-ss", str(t), "-i", video,
+               "-frames:v", "1", "-vf", vf, "-q:v", "3", fp])
+
+    # contact sheet (4 wide)
+    cols = 4
+    rows = (n + cols - 1) // cols
+    sheet = os.path.join(samp_dir, "sheet.jpg")
+    v.run(["ffmpeg", "-y", "-loglevel", "error",
+           "-i", os.path.join(frames_dir, "f%02d.jpg"),
+           "-vf", f"tile={cols}x{rows}", sheet])
+
+    result = {
+        "interval_sec": round(interval, 2),
+        "frames": [{"t": v.hms(t), "desc": ""} for t in times],
+        "summary": "",
+        "sheet_path": v.rel_to_workspace(sheet),
+    }
+    if interval > 30:
+        result["warning"] = "抽得太稀（interval>30s），建议缩小范围或增大 --n"
+
+    if a.mode in ("both", "vlm"):
+        imgs = [base64.b64encode(open(os.path.join(frames_dir, f"f{i:02d}.jpg"), "rb").read()).decode()
+                for i in range(n)]
+        prompt = ((a.question or "描述每帧画面内容与主体状态。") +
+                  "\n每帧左上角有时间戳。请逐帧简述，最后给一段整体 summary。")
+        r = v.mg_post("/vlm", {"images": imgs, "prompt": prompt})
+        result["summary"] = r["content"]
+
+    with open(cache, "w") as f:
+        json.dump(result, f, ensure_ascii=False, indent=2)
+    print(open(cache).read())
+
+
+if __name__ == "__main__":
+    main()

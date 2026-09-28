@@ -1,0 +1,96 @@
+#!/usr/bin/env python3
+"""vasr — transcribe a video via media-gateway (Doubao ASR).
+
+Extracts 16k mono audio, splits into chunks (ASR ~5h/file cap), submits each to
+media-gateway, polls, merges with corrected time offsets. Per-chunk state files
+make it resumable; a finished transcript is served straight from cache.
+
+Long-running: run in the background, e.g.
+    nohup vasr raw/2026-09/live.mp4 > /scratch/vasr.log 2>&1 &
+"""
+import argparse
+import json
+import os
+import time
+
+import _vcommon as v
+
+
+def main():
+    ap = argparse.ArgumentParser(description="Transcribe a video to transcript.json/.txt")
+    ap.add_argument("video")
+    ap.add_argument("--chunk-min", type=int, default=30, help="chunk length in minutes")
+    args = ap.parse_args()
+
+    video, adir = v.resolve_video(args.video)
+    v.ensure_meta(adir, video)
+    out_json = os.path.join(adir, "transcript.json")
+    out_txt = os.path.join(adir, "transcript.txt")
+    if os.path.isfile(out_json) and os.path.isfile(out_txt):
+        v.eprint(f"[vasr] cache hit: {v.rel_to_workspace(out_json)}")
+        print(out_json)
+        return
+
+    dur = v.ffprobe_duration(video)
+    chunk = args.chunk_min * 60
+    n = max(1, int((dur + chunk - 1) // chunk))
+    audio_dir = os.path.join(adir, "audio")
+    state_dir = os.path.join(adir, "asr_state")
+    os.makedirs(audio_dir, exist_ok=True)
+    os.makedirs(state_dir, exist_ok=True)
+    v.eprint(f"[vasr] {os.path.basename(video)} dur={v.hms(dur)} "
+             f"chunks={n} x {args.chunk_min}min")
+
+    all_utts = []
+    for i in range(n):
+        start = i * chunk
+        length = min(chunk, dur - start)
+        wav = os.path.join(audio_dir, f"chunk_{i:03d}.wav")
+        st = os.path.join(state_dir, f"chunk_{i:03d}.json")
+
+        # 1) extract (resumable)
+        if not os.path.isfile(wav):
+            v.eprint(f"[vasr] extract chunk {i + 1}/{n} @ {v.hms(start)} (+{v.hms(length)})")
+            v.run(["ffmpeg", "-y", "-loglevel", "error", "-ss", str(start),
+                   "-t", str(length), "-i", video, "-ac", "1", "-ar", "16000",
+                   "-vn", wav])
+
+        # 2) submit + poll (resumable via state file)
+        if os.path.isfile(st):
+            with open(st) as f:
+                res = json.load(f)
+        else:
+            sub = v.mg_post("/asr/submit", {"path": v.rel_to_workspace(wav)})
+            tid = sub["task_id"]
+            v.eprint(f"[vasr] chunk {i + 1}/{n} task={tid}, polling…")
+            while True:
+                r = v.mg_get(f"/asr/{tid}")
+                if r.get("status") == "done":
+                    res = r
+                    break
+                time.sleep(5)
+            with open(st, "w") as f:
+                json.dump(res, f, ensure_ascii=False)
+
+        # 3) offset timestamps (ms) by chunk start and merge
+        off = int(start * 1000)
+        for u in res.get("utterances", []):
+            uu = dict(u)
+            uu["start_time"] = u.get("start_time", 0) + off
+            uu["end_time"] = u.get("end_time", 0) + off
+            all_utts.append(uu)
+
+    all_utts.sort(key=lambda u: u["start_time"])
+    with open(out_json, "w") as f:
+        json.dump({"video": v.rel_to_workspace(video), "utterances": all_utts},
+                  f, ensure_ascii=False, indent=2)
+    with open(out_txt, "w") as f:
+        for u in all_utts:
+            f.write(f"[{v.hms(u['start_time'] / 1000)}] {u.get('text', '')}\n")
+    v.eprint(f"[vasr] done -> {v.rel_to_workspace(out_json)} "
+             f"({len(all_utts)} utterances)")
+    print(out_json)
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,46 @@
+# FileBrowser Quantum config. Validate against the PINNED image tag's docs
+# (https://filebrowserquantum.com/en/docs) before deploying — the schema evolves.
+#
+# Security posture:
+#   * Proxy-header auth: Caddy authenticates first, then injects X-Forwarded-User.
+#     Trusted ONLY because FileBrowser is never reachable except through Caddy
+#     (internal docker network, no host port). If you ever expose it directly,
+#     ANYONE can spoof the header and log in as any user — don't.
+#   * Command runner disabled (no shell execution from the file manager).
+#   * Built-in signup disabled.
+
+server:
+  port: 80
+  baseURL: "/"
+  # Single source = the TOS mount. raw/ read-only is enforced by the agent's
+  # mount, not here; FileBrowser must keep write access so uploads to raw/ work.
+  sources:
+    - path: /srv
+      name: "TOS"
+
+auth:
+  # The proxy user becomes admin (matches CADDY_BASIC_USER = "team").
+  adminUsername: team
+  methods:
+    password:
+      enabled: false
+      signup: false
+    proxy:
+      enabled: true
+      header: X-Forwarded-User
+      createUser: true
+
+userDefaults:
+  darkMode: true
+  permissions:
+    admin: false
+    modify: true    # create folders, drag-move, rename, upload
+    share: false
+    api: false
+
+frontend:
+  name: "视频素材库"
+  disableDefaultLinks: true
+
+# Chunked upload for large (>=2GB) files is on by default in Quantum; the size
+# limit is governed by the reverse proxy (Caddy streams without a body cap).
