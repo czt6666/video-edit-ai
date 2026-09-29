@@ -25,26 +25,63 @@ volumes:
   agent_home:
   # Local scratch for the agent — fast disk, never synced to TOS.
   agent_scratch:
-  filebrowser_data:
+  # SQLite for our auth-service (accounts). Never inside the TOS mount.
+  auth_data:
 
 services:
-  # ---- Public TLS entrypoint + shared password ----------------------------
+  # ---- Public TLS entrypoint (single domain, single login) ----------------
   caddy:
     image: caddy:2.8
     restart: unless-stopped
-    networks: [agent_net, egress]
+    networks: [agent_net, egress]   # egress for ACME; agent_net to reach backends
     ports:
       - "80:80"
       - "443:443"
     environment:
       DOMAIN: ${DOMAIN}
       ACME_EMAIL: ${ACME_EMAIL}
-      CADDY_BASIC_USER: ${CADDY_BASIC_USER}
-      CADDY_BASIC_HASH: ${CADDY_BASIC_HASH}
     volumes:
       - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data
       - caddy_config:/config
+    depends_on:
+      - auth-service
+      - file-manager
+      - agent
+
+  # ---- Auth service (accounts, login, admin CRUD, forward_auth) -----------
+  auth-service:
+    build: ./auth-service
+    restart: unless-stopped
+    networks: [agent_net]           # no internet needed
+    expose:
+      - "8080"
+    environment:
+      AUTH_DB_PATH: /data/auth.db
+      AUTH_JWT_SECRET: ${AUTH_JWT_SECRET}
+      AUTH_ADMIN_USER: ${AUTH_ADMIN_USER:-admin}
+      AUTH_ADMIN_PASSWORD: ${AUTH_ADMIN_PASSWORD}
+      AUTH_COOKIE_SECURE: ${AUTH_COOKIE_SECURE:-true}
+    volumes:
+      - auth_data:/data
+    security_opt:
+      - no-new-privileges:true
+
+  # ---- File manager (finder-like UI + upload/delete over TOS) -------------
+  file-manager:
+    build: ./file-manager
+    restart: unless-stopped
+    networks: [agent_net]           # no internet; only the TOS mount
+    expose:
+      - "8080"
+    environment:
+      FM_WORKSPACE_ROOT: /workspace
+      FM_TRUST_PROXY_AUTH: "true"
+    volumes:
+      # Full read-write over the mount so uploads land anywhere (incl. raw/).
+      - /mnt/tos:/workspace:rw
+    security_opt:
+      - no-new-privileges:true
 
   # ---- Claude Code UI + CLI + ffmpeg + our CLIs + Skills ------------------
   agent:
@@ -66,11 +103,11 @@ services:
       CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
       MEDIA_GATEWAY_URL: http://media-gateway:8080
       MEDIA_GATEWAY_TOKEN: ${MEDIA_GATEWAY_TOKEN}
-      # claudecodeui
+      # claudecodeui (platform mode: its own login is disabled; Caddy owns auth)
       SERVER_PORT: "3001"
       WORKSPACES_ROOT: ${WORKSPACES_ROOT:-/workspace}
-      DATABASE_PATH: /home/agent/.claude/ccui-auth.db
-      JWT_SECRET: ${CCUI_JWT_SECRET}
+      DATABASE_PATH: /home/agent/.claude/ccui/auth.db
+      VITE_IS_PLATFORM: "true"
     volumes:
       # TOS mount (host, rclone) -> workspace (read-write)
       - /mnt/tos:/workspace:rw
@@ -84,30 +121,11 @@ services:
     security_opt:
       - no-new-privileges:true
     pids_limit: 512
-    deploy:
-      resources:
-        limits:
-          cpus: "6.0"
-          memory: 8g
+    cpus: 6.0
+    mem_limit: 8g
     depends_on:
       - litellm
       - media-gateway
-
-  # ---- FileBrowser Quantum (finder-like file manager) --------------------
-  filebrowser:
-    # Pin to a fixed tag; do not track :latest / beta in production.
-    image: gtstef/filebrowser:v2.0.0
-    restart: unless-stopped
-    networks: [egress]
-    expose:
-      - "80"
-    environment:
-      FB_ADMIN_USER: ${FB_ADMIN_USER}
-      FB_ADMIN_PASSWORD: ${FB_ADMIN_PASSWORD}
-    volumes:
-      - /mnt/tos:/srv:rw
-      - ./filebrowser/config.yaml:/home/filebrowser/data/config.yaml:ro
-      - filebrowser_data:/home/filebrowser/data/db
 
   # ---- LiteLLM (LLM gateway; holds the real Anthropic key) ---------------
   litellm:

@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>账号管理 · 视频剪辑工作台</title>
+  <style>
+    :root { color-scheme: light dark; }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; padding: 32px; min-height: 100vh;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+        "Microsoft YaHei", sans-serif;
+      background: #0f172a; color: #e2e8f0;
+    }
+    .wrap { max-width: 760px; margin: 0 auto; }
+    header { display: flex; align-items: baseline; justify-content: space-between; }
+    h1 { font-size: 22px; margin: 0 0 4px; }
+    .sub { color: #94a3b8; font-size: 13px; }
+    a.link { color: #818cf8; font-size: 13px; text-decoration: none; }
+    .panel {
+      margin-top: 22px; background: #1e293b; border-radius: 12px; padding: 20px;
+      box-shadow: 0 8px 30px rgba(0,0,0,.3);
+    }
+    h2 { font-size: 15px; margin: 0 0 14px; color: #cbd5e1; }
+    table { width: 100%; border-collapse: collapse; font-size: 14px; }
+    th, td { text-align: left; padding: 10px 8px; border-bottom: 1px solid #334155; }
+    th { color: #94a3b8; font-weight: 600; font-size: 12px; text-transform: uppercase; }
+    .tag { font-size: 11px; padding: 2px 8px; border-radius: 999px; background: #4338ca; }
+    .del { background: #b91c1c; border: 0; color: #fff; padding: 6px 12px; border-radius: 6px; cursor: pointer; font-size: 13px; }
+    .del:hover { background: #991b1b; }
+    .del:disabled { opacity: .4; cursor: default; }
+    form.add { display: flex; gap: 10px; flex-wrap: wrap; align-items: end; margin-top: 4px; }
+    .field { display: flex; flex-direction: column; gap: 5px; }
+    .field label { font-size: 12px; color: #94a3b8; }
+    input[type=text], input[type=password] {
+      padding: 9px 11px; border-radius: 8px; border: 1px solid #334155;
+      background: #0f172a; color: #e2e8f0; font-size: 14px;
+    }
+    .chk { display: flex; align-items: center; gap: 6px; font-size: 13px; padding-bottom: 9px; }
+    button.add-btn { background: #6366f1; color: #fff; border: 0; padding: 10px 18px; border-radius: 8px; cursor: pointer; font-weight: 600; }
+    button.add-btn:hover { background: #4f46e5; }
+    .msg { min-height: 18px; margin-top: 12px; font-size: 13px; }
+    .msg.err { color: #f87171; }
+    .msg.ok { color: #34d399; }
+    #gate { display: none; text-align: center; color: #f87171; margin-top: 40px; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <div>
+        <h1>账号管理</h1>
+        <div class="sub">新增 / 删除工作台账号</div>
+      </div>
+      <div>
+        <a class="link" href="/" >← 返回工作台</a>
+        &nbsp;·&nbsp;
+        <a class="link" href="#" id="logout">退出登录</a>
+      </div>
+    </header>
+
+    <div id="gate">你不是管理员，无权访问此页面。</div>
+
+    <div id="app" style="display:none;">
+      <div class="panel">
+        <h2>现有账号</h2>
+        <table>
+          <thead><tr><th>ID</th><th>用户名</th><th>角色</th><th></th></tr></thead>
+          <tbody id="rows"></tbody>
+        </table>
+      </div>
+
+      <div class="panel">
+        <h2>新增账号</h2>
+        <form class="add" id="addForm">
+          <div class="field">
+            <label>用户名</label>
+            <input id="nu" type="text" autocomplete="off" required />
+          </div>
+          <div class="field">
+            <label>密码</label>
+            <input id="np" type="password" autocomplete="new-password" required />
+          </div>
+          <div class="chk">
+            <input id="na" type="checkbox" /> <label for="na">设为管理员</label>
+          </div>
+          <button class="add-btn" type="submit">添加</button>
+        </form>
+        <div class="msg" id="msg"></div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    let me = null;
+
+    async function api(path, opts) {
+      const res = await fetch(path, Object.assign({ headers: { "Content-Type": "application/json" } }, opts));
+      if (res.status === 401) { location.href = "/login?next=/admin"; throw new Error("unauth"); }
+      return res;
+    }
+
+    async function boot() {
+      const res = await api("/api/auth/me");
+      me = (await res.json()).user;
+      if (!me.is_admin) { document.getElementById("gate").style.display = "block"; return; }
+      document.getElementById("app").style.display = "block";
+      await refresh();
+    }
+
+    async function refresh() {
+      const res = await api("/api/admin/users");
+      const users = (await res.json()).users;
+      const tbody = document.getElementById("rows");
+      tbody.innerHTML = "";
+      for (const u of users) {
+        const tr = document.createElement("tr");
+        const isSelf = u.id === me.id;
+        tr.innerHTML =
+          `<td>${u.id}</td>` +
+          `<td>${escapeHtml(u.username)}</td>` +
+          `<td>${u.is_admin ? '<span class="tag">管理员</span>' : '<span style="color:#94a3b8">成员</span>'}</td>` +
+          `<td style="text-align:right"></td>`;
+        const btn = document.createElement("button");
+        btn.className = "del";
+        btn.textContent = isSelf ? "当前登录" : "删除";
+        btn.disabled = isSelf;
+        if (!isSelf) btn.onclick = () => removeUser(u.id, u.username);
+        tr.lastElementChild.appendChild(btn);
+        tbody.appendChild(tr);
+      }
+    }
+
+    async function removeUser(id, name) {
+      if (!confirm(`确认删除账号 “${name}”？`)) return;
+      const res = await api(`/api/admin/users/${id}`, { method: "DELETE" });
+      if (res.ok) { await refresh(); }
+      else { const b = await res.json().catch(() => ({})); showMsg(b.detail || "删除失败", true); }
+    }
+
+    document.getElementById("addForm").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      showMsg("");
+      const res = await api("/api/admin/users", {
+        method: "POST",
+        body: JSON.stringify({
+          username: document.getElementById("nu").value,
+          password: document.getElementById("np").value,
+          is_admin: document.getElementById("na").checked,
+        }),
+      });
+      if (res.ok) {
+        document.getElementById("nu").value = "";
+        document.getElementById("np").value = "";
+        document.getElementById("na").checked = false;
+        showMsg("已添加", false);
+        await refresh();
+      } else {
+        const b = await res.json().catch(() => ({}));
+        showMsg(b.detail || "添加失败", true);
+      }
+    });
+
+    document.getElementById("logout").addEventListener("click", async (e) => {
+      e.preventDefault();
+      await fetch("/api/auth/logout", { method: "POST" });
+      location.href = "/login";
+    });
+
+    function showMsg(text, isErr) {
+      const el = document.getElementById("msg");
+      el.textContent = text;
+      el.className = "msg " + (text ? (isErr ? "err" : "ok") : "");
+    }
+    function escapeHtml(s) {
+      return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+    }
+
+    boot().catch((e) => { if (e.message !== "unauth") console.error(e); });
+  </script>
+</body>
+</html>

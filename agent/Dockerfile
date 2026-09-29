@@ -31,12 +31,19 @@ RUN apt-get update && apt-get install -y --no-install-recommends build-essential
 # GitHub API (403 anonymous rate-limit, and blocked in CN). 1.18.0 bundles the
 # binaries in the tarball — no network call. We bump it, so `npm install`
 # (not `npm ci`, which would reject the lockfile drift) is used.
+# Platform mode is a BUILD-TIME flag (Vite bakes VITE_IS_PLATFORM into the
+# bundle): it disables claudecodeui's own login so our gateway can own auth.
+ENV VITE_IS_PLATFORM=true
+# Our fork patches (UI strip: trims tabs + settings). Pinned to CCUI_REF; if a
+# future ref shifts the patched lines, `git apply` fails loudly on rebuild.
+COPY patches/ /opt/agent/patches/
 RUN git clone https://github.com/siteboon/claudecodeui /opt/claudecodeui \
     && cd /opt/claudecodeui \
     && git checkout ${CCUI_REF} \
+    && git apply /opt/agent/patches/0001-ui-strip.patch \
     && python3 -c "import json;d=json.load(open('package.json'));d['dependencies']['@vscode/ripgrep']='^1.18.0';json.dump(d,open('package.json','w'),indent=2)" \
     && npm install \
-    && npm run build
+    && VITE_IS_PLATFORM=true npm run build
 
 # --- non-root user ---------------------------------------------------------
 # uid 10001 must match rclone mount --uid so /workspace is writable.
@@ -49,10 +56,16 @@ RUN chmod +x /usr/local/bin/vasr /usr/local/bin/vslice /usr/local/bin/vsample
 # --- managed claude home (synced into the volume at boot) ------------------
 COPY claude/ /opt/agent/claude-home/
 COPY skills/ /opt/agent/claude-home/skills/
+COPY platform-init.mjs /opt/agent/platform-init.mjs
+COPY ccui-nav.html ccui-inject-nav.mjs /opt/agent/
+# Inject our unified cross-navigation into the built claudecodeui index.
+RUN node /opt/agent/ccui-inject-nav.mjs /opt/claudecodeui/dist/index.html
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 
-ENV WORKSPACE_ROOT=/workspace
+ENV WORKSPACE_ROOT=/workspace \
+    WORKSPACES_ROOT=/workspace \
+    VITE_IS_PLATFORM=true
 USER agent
 WORKDIR /opt/claudecodeui
 EXPOSE 3001

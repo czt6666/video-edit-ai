@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>文件 · 视频剪辑工作台</title>
+  <style>
+    :root { color-scheme: light dark; }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; min-height: 100vh; color: #e2e8f0; background: #0f172a;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    }
+    header {
+      display: flex; align-items: center; gap: 14px; padding: 14px 20px;
+      background: #1e293b; border-bottom: 1px solid #334155; position: sticky; top: 0; z-index: 5;
+    }
+    header .title { font-weight: 700; font-size: 16px; }
+    header .spacer { flex: 1; }
+    header a, header button {
+      color: #cbd5e1; background: transparent; border: 1px solid #334155;
+      padding: 7px 12px; border-radius: 8px; font-size: 13px; cursor: pointer; text-decoration: none;
+    }
+    header button.primary { background: #6366f1; border-color: #6366f1; color: #fff; font-weight: 600; }
+    header button.primary:hover { background: #4f46e5; }
+    header a:hover, header button:hover { border-color: #64748b; }
+    .crumbs { padding: 12px 20px; font-size: 13px; color: #94a3b8; }
+    .crumbs a { color: #818cf8; text-decoration: none; cursor: pointer; }
+    main { padding: 0 20px 40px; max-width: 980px; margin: 0 auto; }
+    table { width: 100%; border-collapse: collapse; font-size: 14px; }
+    th, td { text-align: left; padding: 11px 8px; border-bottom: 1px solid #1e293b; }
+    th { color: #64748b; font-size: 11px; text-transform: uppercase; }
+    tr.item:hover { background: #1e293b; }
+    td.name { cursor: pointer; }
+    td.name .icon { margin-right: 8px; }
+    td.size, td.time { color: #94a3b8; white-space: nowrap; }
+    td.actions { text-align: right; }
+    .del { color: #f87171; background: transparent; border: 0; cursor: pointer; font-size: 13px; }
+    .del:hover { text-decoration: underline; }
+    .empty { color: #64748b; padding: 40px; text-align: center; }
+    .drop { outline: 2px dashed #6366f1; outline-offset: -12px; }
+    /* preview modal */
+    .modal { position: fixed; inset: 0; background: rgba(0,0,0,.8); display: none; place-items: center; z-index: 20; }
+    .modal.open { display: grid; }
+    .modal .box { background: #0f172a; border: 1px solid #334155; border-radius: 12px; max-width: 90vw; max-height: 90vh; overflow: auto; padding: 16px; }
+    .modal .box h3 { margin: 0 0 12px; font-size: 15px; word-break: break-all; }
+    .modal video, .modal img { max-width: 84vw; max-height: 74vh; border-radius: 8px; display: block; }
+    .modal pre { max-width: 84vw; max-height: 74vh; overflow: auto; background: #1e293b; padding: 14px; border-radius: 8px; font-size: 13px; }
+    .modal .close { float: right; cursor: pointer; color: #94a3b8; border: 0; background: transparent; font-size: 18px; }
+    #msg { padding: 0 20px; min-height: 18px; font-size: 13px; }
+    #msg.err { color: #f87171; } #msg.ok { color: #34d399; }
+    .bar { height: 3px; background: #6366f1; width: 0; transition: width .2s; }
+  </style>
+</head>
+<body>
+  <header>
+    <span class="title">📁 文件</span>
+    <div class="spacer"></div>
+    <button class="primary" id="uploadBtn">上传</button>
+    <button id="mkdirBtn">新建文件夹</button>
+    <a href="/">聊天工作台</a>
+    <a href="/admin" id="adminLink" style="display:none">账号管理</a>
+    <a href="#" id="logout">退出</a>
+    <input type="file" id="fileInput" multiple style="display:none" />
+  </header>
+  <div class="bar" id="bar"></div>
+  <div class="crumbs" id="crumbs"></div>
+  <div id="msg"></div>
+  <main id="main">
+    <table>
+      <thead><tr><th>名称</th><th class="size">大小</th><th class="time">修改时间</th><th></th></tr></thead>
+      <tbody id="rows"></tbody>
+    </table>
+    <div class="empty" id="empty" style="display:none">这个文件夹是空的</div>
+  </main>
+
+  <div class="modal" id="modal">
+    <div class="box">
+      <button class="close" id="modalClose">✕</button>
+      <h3 id="modalTitle"></h3>
+      <div id="modalBody"></div>
+    </div>
+  </div>
+
+  <script>
+    let cwd = "";
+    const $ = (id) => document.getElementById(id);
+
+    async function api(path, opts) {
+      const res = await fetch(path, opts);
+      if (res.status === 401) { location.href = "/login?next=/files"; throw new Error("unauth"); }
+      return res;
+    }
+    function fmtSize(n) {
+      if (!n) return "—";
+      const u = ["B","KB","MB","GB","TB"]; let i = 0;
+      while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
+      return n.toFixed(i ? 1 : 0) + " " + u[i];
+    }
+    function fmtTime(s) { return new Date(s * 1000).toLocaleString("zh-CN", { hour12: false }); }
+    function esc(s) { return String(s).replace(/[&<>"']/g, c => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[c])); }
+    function ext(name) { return (name.split(".").pop() || "").toLowerCase(); }
+
+    function showMsg(t, err) { const m = $("msg"); m.textContent = t; m.className = t ? (err ? "err" : "ok") : ""; }
+
+    function renderCrumbs() {
+      const parts = cwd ? cwd.split("/") : [];
+      let acc = "";
+      const links = [`<a data-path="">工作台</a>`];
+      for (const p of parts) { acc = acc ? acc + "/" + p : p; links.push(`<a data-path="${esc(acc)}">${esc(p)}</a>`); }
+      $("crumbs").innerHTML = links.join(" / ");
+      $("crumbs").querySelectorAll("a").forEach(a => a.onclick = () => go(a.dataset.path));
+    }
+
+    async function go(path) {
+      cwd = path || "";
+      renderCrumbs();
+      const res = await api("/api/files/list?path=" + encodeURIComponent(cwd));
+      if (!res.ok) { showMsg("无法打开目录", true); return; }
+      const data = await res.json();
+      const tbody = $("rows"); tbody.innerHTML = "";
+      $("empty").style.display = data.entries.length ? "none" : "block";
+      for (const e of data.entries) {
+        const tr = document.createElement("tr"); tr.className = "item";
+        const icon = e.type === "dir" ? "📁" : (["mp4","mov","mkv","webm"].includes(ext(e.name)) ? "🎬" : "📄");
+        tr.innerHTML =
+          `<td class="name"><span class="icon">${icon}</span>${esc(e.name)}</td>` +
+          `<td class="size">${e.type === "dir" ? "—" : fmtSize(e.size)}</td>` +
+          `<td class="time">${fmtTime(e.mtime)}</td>` +
+          `<td class="actions"><button class="del">删除</button></td>`;
+        tr.querySelector(".name").onclick = () => e.type === "dir" ? go(e.path) : preview(e);
+        tr.querySelector(".del").onclick = (ev) => { ev.stopPropagation(); del(e); };
+        tbody.appendChild(tr);
+      }
+    }
+
+    async function del(e) {
+      if (!confirm(`确认删除 “${e.name}”？` + (e.type === "dir" ? "（含其中所有内容）" : ""))) return;
+      const res = await api("/api/files?path=" + encodeURIComponent(e.path) + (e.type === "dir" ? "&recursive=true" : ""), { method: "DELETE" });
+      if (res.ok) { showMsg("已删除"); go(cwd); }
+      else { const b = await res.json().catch(() => ({})); showMsg(b.detail || "删除失败", true); }
+    }
+
+    async function preview(e) {
+      const url = "/api/files/download?path=" + encodeURIComponent(e.path);
+      $("modalTitle").textContent = e.name;
+      const body = $("modalBody"); body.innerHTML = "";
+      const kind = ext(e.name);
+      if (["mp4","mov","webm","mkv"].includes(kind)) {
+        body.innerHTML = `<video src="${url}" controls autoplay></video>`;
+      } else if (["png","jpg","jpeg","gif","webp","bmp"].includes(kind)) {
+        body.innerHTML = `<img src="${url}" />`;
+      } else if (["txt","json","srt","ass","vtt","md","log","csv"].includes(kind) || e.size < 512*1024) {
+        const t = await (await api(url)).text();
+        const pre = document.createElement("pre"); pre.textContent = t; body.appendChild(pre);
+      } else {
+        body.innerHTML = `<a href="${url}" download>下载 ${esc(e.name)}</a>`;
+      }
+      $("modal").classList.add("open");
+    }
+    $("modalClose").onclick = () => $("modal").classList.remove("open");
+    $("modal").onclick = (ev) => { if (ev.target.id === "modal") $("modal").classList.remove("open"); };
+
+    // upload
+    $("uploadBtn").onclick = () => $("fileInput").click();
+    $("fileInput").onchange = () => uploadFiles([...$("fileInput").files]);
+    async function uploadFiles(files) {
+      for (const f of files) {
+        showMsg(`上传 ${f.name} …`);
+        await uploadOne(f);
+      }
+      $("fileInput").value = "";
+      showMsg("上传完成"); go(cwd);
+    }
+    function uploadOne(file) {
+      return new Promise((resolve) => {
+        const fd = new FormData(); fd.append("file", file);
+        const xhr = new XMLHttpRequest();
+        xhr.open("POST", "/api/files/upload?path=" + encodeURIComponent(cwd));
+        xhr.upload.onprogress = (e) => { if (e.lengthComputable) $("bar").style.width = (e.loaded / e.total * 100) + "%"; };
+        xhr.onload = () => { $("bar").style.width = "0"; if (xhr.status === 401) location.href = "/login?next=/files"; resolve(); };
+        xhr.onerror = () => { $("bar").style.width = "0"; showMsg("上传失败", true); resolve(); };
+        xhr.send(fd);
+      });
+    }
+
+    $("mkdirBtn").onclick = async () => {
+      const name = prompt("新文件夹名称");
+      if (!name) return;
+      const target = cwd ? cwd + "/" + name : name;
+      const res = await api("/api/files/mkdir?path=" + encodeURIComponent(target), { method: "POST" });
+      if (res.ok) go(cwd); else showMsg("创建失败", true);
+    };
+
+    $("logout").onclick = async (e) => { e.preventDefault(); await fetch("/api/auth/logout", { method: "POST" }); location.href = "/login"; };
+
+    // drag & drop
+    document.body.addEventListener("dragover", (e) => { e.preventDefault(); document.body.classList.add("drop"); });
+    document.body.addEventListener("dragleave", (e) => { if (e.target === document.body) document.body.classList.remove("drop"); });
+    document.body.addEventListener("drop", (e) => {
+      e.preventDefault(); document.body.classList.remove("drop");
+      if (e.dataTransfer.files.length) uploadFiles([...e.dataTransfer.files]);
+    });
+
+    // show admin link if the current user is an admin
+    fetch("/api/auth/me").then(r => r.ok ? r.json() : null).then(d => {
+      if (d && d.user && d.user.is_admin) $("adminLink").style.display = "inline-block";
+    }).catch(() => {});
+
+    go("").catch((e) => { if (e.message !== "unauth") console.error(e); });
+  </script>
+</body>
+</html>
